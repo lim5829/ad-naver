@@ -658,7 +658,7 @@ function CampaignsPage({ user, apiSettings, onBack, onLogout, showToast }) {
   const displayCampaigns = showAll ? campaigns : activeCampaigns;
 
   return (
-    <div style={{ minHeight: "100vh", padding: "0 20px 40px" }}>
+    <div style={{ minHeight: "100vh", padding: "0 20px 80px" }}>
       {/* Header */}
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "20px 0 16px", position: "sticky", top: 0, zIndex: 10, background: `linear-gradient(${theme.bg}, ${theme.bg}ee)`, backdropFilter: "blur(12px)" }}>
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
@@ -738,22 +738,196 @@ function CampaignsPage({ user, apiSettings, onBack, onLogout, showToast }) {
   );
 }
 
+// ─── Tab Bar ───
+function TabBar({ active, onChange }) {
+  const tabs = [
+    { id: "campaigns", label: "캠페인", icon: <svg width="20" height="20" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="1.8"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg> },
+    { id: "cost", label: "광고비", icon: <svg width="20" height="20" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="1.8"><line x1="12" y1="1" x2="12" y2="23"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg> },
+  ];
+  return (
+    <div style={{ position: "fixed", bottom: 0, left: "50%", transform: "translateX(-50%)", width: "100%", maxWidth: 480, background: theme.surface, borderTop: `1px solid ${theme.border}`, display: "flex", zIndex: 100, paddingBottom: "env(safe-area-inset-bottom, 0px)" }}>
+      {tabs.map(t => (
+        <button key={t.id} onClick={() => onChange(t.id)} style={{
+          flex: 1, display: "flex", flexDirection: "column", alignItems: "center", gap: 2,
+          padding: "10px 0 8px", background: "none", border: "none", cursor: "pointer",
+          color: active === t.id ? theme.accent : theme.textDim, transition: "color 0.2s",
+        }}>
+          {t.icon}
+          <span style={{ fontSize: 10, fontWeight: 700 }}>{t.label}</span>
+        </button>
+      ))}
+    </div>
+  );
+}
+
+// ─── Cost Page ───
+function CostPage({ user, apiSettings, onBack, onLogout, showToast }) {
+  const [campaigns, setCampaigns] = useState([]);
+  const [stats, setStats] = useState({});
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+
+  const periods = [
+    { key: "today", label: "오늘", preset: "today" },
+    { key: "yesterday", label: "어제", preset: "yesterday" },
+    { key: "thisMonth", label: "이번달", useRange: true },
+    { key: "lastMonth", label: "지난달", preset: "lastmonth" },
+  ];
+
+  const getThisMonthRange = () => {
+    const now = new Date();
+    const since = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-01`;
+    const until = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
+    return { since, until };
+  };
+
+  const fetchAll = useCallback(async () => {
+    setLoading(true); setError("");
+    try {
+      // 1. 캠페인 목록 가져오기
+      const campData = await naverApiFetch({ path: "/api/campaigns", ...apiSettings });
+      const camps = Array.isArray(campData) ? campData : [];
+      setCampaigns(camps);
+
+      if (camps.length === 0) { setLoading(false); return; }
+
+      const ids = camps.map(c => c.nccCampaignId).join(",");
+      const fields = '["clkCnt","impCnt","salesAmt","cpc","ctr"]';
+      const results = {};
+
+      // 2. 각 기간별 통계 조회
+      for (const p of periods) {
+        try {
+          let data;
+          if (p.useRange) {
+            const { since, until } = getThisMonthRange();
+            data = await naverApiFetch({
+              path: `/api/stats-range?ids=${encodeURIComponent(ids)}&fields=${encodeURIComponent(fields)}&since=${since}&until=${until}`,
+              ...apiSettings,
+            });
+          } else {
+            data = await naverApiFetch({
+              path: `/api/stats-summary?ids=${encodeURIComponent(ids)}&fields=${encodeURIComponent(fields)}&datePreset=${p.preset}`,
+              ...apiSettings,
+            });
+          }
+          // 합산
+          const arr = Array.isArray(data) ? data : [];
+          const totals = { clkCnt: 0, impCnt: 0, salesAmt: 0, cpc: 0, ctr: 0 };
+          arr.forEach(item => {
+            totals.clkCnt += item.clkCnt || 0;
+            totals.impCnt += item.impCnt || 0;
+            totals.salesAmt += item.salesAmt || 0;
+          });
+          totals.cpc = totals.clkCnt > 0 ? Math.round(totals.salesAmt / totals.clkCnt) : 0;
+          totals.ctr = totals.impCnt > 0 ? ((totals.clkCnt / totals.impCnt) * 100).toFixed(2) : "0.00";
+          results[p.key] = totals;
+        } catch (e) {
+          results[p.key] = { clkCnt: "-", impCnt: "-", salesAmt: "-", cpc: "-", ctr: "-", error: e.message };
+        }
+      }
+      setStats(results);
+    } catch (e) {
+      setError(e.message);
+    }
+    setLoading(false);
+  }, [apiSettings]);
+
+  useEffect(() => { fetchAll(); }, [fetchAll]);
+
+  const StatCard = ({ period }) => {
+    const s = stats[period.key];
+    const hasError = s?.error;
+    return (
+      <Card style={{ marginBottom: 12, padding: 16 }}>
+        <div style={{ fontSize: 15, fontWeight: 800, color: theme.text, marginBottom: 14 }}>{period.label}</div>
+        {hasError ? (
+          <div style={{ fontSize: 12, color: theme.danger, padding: 8, background: theme.dangerDim, borderRadius: 8 }}>{s.error}</div>
+        ) : !s ? (
+          <div style={{ height: 60, background: theme.surfaceLight, borderRadius: 10, animation: "pulse 1.5s ease-in-out infinite" }} />
+        ) : (
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8 }}>
+            <div style={{ background: theme.surfaceLight, borderRadius: 10, padding: "12px 8px", textAlign: "center" }}>
+              <div style={{ fontSize: 10, color: theme.textDim, fontWeight: 600, marginBottom: 4 }}>클릭수</div>
+              <div style={{ fontSize: 18, fontWeight: 800, color: theme.accent }}>{typeof s.clkCnt === "number" ? fmtNum(s.clkCnt) : s.clkCnt}</div>
+            </div>
+            <div style={{ background: theme.surfaceLight, borderRadius: 10, padding: "12px 8px", textAlign: "center" }}>
+              <div style={{ fontSize: 10, color: theme.textDim, fontWeight: 600, marginBottom: 4 }}>평균 CPC</div>
+              <div style={{ fontSize: 16, fontWeight: 800, color: theme.text }}>{typeof s.cpc === "number" ? `${fmtNum(s.cpc)}원` : s.cpc}</div>
+            </div>
+            <div style={{ background: theme.surfaceLight, borderRadius: 10, padding: "12px 8px", textAlign: "center" }}>
+              <div style={{ fontSize: 10, color: theme.textDim, fontWeight: 600, marginBottom: 4 }}>총 비용</div>
+              <div style={{ fontSize: 16, fontWeight: 800, color: theme.danger }}>{typeof s.salesAmt === "number" ? `${fmtNum(s.salesAmt)}원` : s.salesAmt}</div>
+            </div>
+          </div>
+        )}
+      </Card>
+    );
+  };
+
+  return (
+    <div style={{ minHeight: "100vh", padding: "0 20px 80px" }}>
+      {/* Header */}
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "20px 0 16px", position: "sticky", top: 0, zIndex: 10, background: `linear-gradient(${theme.bg}, ${theme.bg}ee)`, backdropFilter: "blur(12px)" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          <button onClick={onBack} style={{ background: theme.surface, border: `1.5px solid ${theme.border}`, borderRadius: 10, width: 38, height: 38, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", color: theme.text, boxShadow: theme.cardShadow }}>{I.back}</button>
+          <div>
+            <div style={{ fontSize: 17, fontWeight: 800, color: theme.text }}>광고비</div>
+            <div style={{ fontSize: 11, color: theme.textDim, fontWeight: 500 }}>{user.name}</div>
+          </div>
+        </div>
+        <div style={{ display: "flex", gap: 8 }}>
+          <button onClick={fetchAll} style={{ background: theme.surface, border: `1.5px solid ${theme.border}`, borderRadius: 10, width: 38, height: 38, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", color: theme.accent, boxShadow: theme.cardShadow }}>{I.refresh}</button>
+          <button onClick={onLogout} style={{ background: theme.surface, border: `1.5px solid ${theme.border}`, borderRadius: 10, width: 38, height: 38, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", color: theme.textDim, boxShadow: theme.cardShadow }}>{I.logout}</button>
+        </div>
+      </div>
+
+      {loading && (
+        <div>
+          {[1,2,3,4].map(i => (
+            <Card key={i} style={{ marginBottom: 12, padding: 16 }}>
+              <div style={{ height: 16, width: 60, background: theme.surfaceLight, borderRadius: 8, marginBottom: 14, animation: "pulse 1.5s ease-in-out infinite" }} />
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8 }}>
+                {[1,2,3].map(j => <div key={j} style={{ height: 56, background: theme.surfaceLight, borderRadius: 10, animation: "pulse 1.5s ease-in-out infinite" }} />)}
+              </div>
+            </Card>
+          ))}
+          <style>{`@keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.4} }`}</style>
+        </div>
+      )}
+
+      {error && (
+        <Card style={{ padding: 20, textAlign: "center" }}>
+          <div style={{ fontSize: 30, marginBottom: 10 }}>⚠️</div>
+          <div style={{ fontSize: 14, color: theme.danger, fontWeight: 600, marginBottom: 6 }}>연결 오류</div>
+          <div style={{ fontSize: 12, color: theme.textDim, marginBottom: 16, lineHeight: 1.5 }}>{error}</div>
+          <Button onClick={fetchAll} variant="secondary">다시 시도</Button>
+        </Card>
+      )}
+
+      {!loading && !error && periods.map(p => (
+        <StatCard key={p.key} period={p} />
+      ))}
+    </div>
+  );
+}
+
 // ─── App ───
 function App() {
   const [page, setPage] = useState("loading");
+  const [tab, setTab] = useState("campaigns");
   const [user, setUser] = useState(null);
   const [toast, setToast] = useState(null);
   const [apiSettings, setApiSettings] = useState(null);
 
   const showToast = useCallback((message, type = "success") => setToast({ message, type }), []);
 
-  // ─── 자동 로그인: 앱 시작 시 저장된 세션 확인 ───
+  // ─── 자동 로그인 ───
   useEffect(() => {
     const savedSession = localStorage.getItem("naver-ad-session");
     if (savedSession) {
       try {
         const sessionUser = JSON.parse(savedSession);
-        // 유저 데이터에 실제 존재하는지 확인
         const users = JSON.parse(localStorage.getItem("naver-ad-users") || "[]");
         const valid = users.find(u => u.id === sessionUser.id && u.email === sessionUser.email);
         if (valid) {
@@ -761,9 +935,9 @@ function App() {
           const apiData = localStorage.getItem(`naver-ad-api-settings-${valid.id}`);
           if (apiData) {
             setApiSettings(JSON.parse(apiData));
-            setPage("campaigns"); // API 설정 있으면 바로 캠페인으로
+            setPage("main");
           } else {
-            setPage("settings"); // API 설정 없으면 설정 페이지로
+            setPage("settings");
           }
           return;
         }
@@ -772,21 +946,19 @@ function App() {
     setPage("login");
   }, []);
 
-  // ─── 로그인 처리 ───
   const handleLogin = useCallback((u) => {
     setUser(u);
     localStorage.setItem("naver-ad-session", JSON.stringify({ id: u.id, email: u.email }));
     const apiData = localStorage.getItem(`naver-ad-api-settings-${u.id}`);
     if (apiData) {
       setApiSettings(JSON.parse(apiData));
-      setPage("campaigns");
+      setPage("main");
     } else {
       setPage("settings");
     }
     showToast(`${u.name}님 환영합니다!`);
   }, [showToast]);
 
-  // ─── 로그아웃 처리 ───
   const handleLogout = useCallback(() => {
     setUser(null);
     setApiSettings(null);
@@ -795,14 +967,12 @@ function App() {
     showToast("로그아웃 되었습니다", "info");
   }, [showToast]);
 
-  // ─── API 저장 후 캠페인으로 바로 이동 ───
   const handleApiSave = useCallback((s) => {
     setApiSettings(s);
-    showToast("API 설정 저장 완료! 캠페인으로 이동합니다");
-    setTimeout(() => setPage("campaigns"), 600);
+    showToast("API 설정 저장 완료!");
+    setTimeout(() => setPage("main"), 600);
   }, [showToast]);
 
-  // 로딩 스플래시
   if (page === "loading") {
     return (
       <div style={{ maxWidth: 480, margin: "0 auto", minHeight: "100vh", background: theme.bg, display: "flex", alignItems: "center", justifyContent: "center", flexDirection: "column", gap: 16 }}>
@@ -820,8 +990,10 @@ function App() {
       <div style={{ position: "relative", zIndex: 1 }}>
         {page === "login" && <LoginPage onLogin={handleLogin} onGoSignup={() => setPage("signup")} />}
         {page === "signup" && <SignupPage onSignup={handleLogin} onGoLogin={() => setPage("login")} />}
-        {page === "settings" && user && <ApiSettingsPage user={user} apiSettings={apiSettings} onLogout={handleLogout} onSave={handleApiSave} onGoCampaigns={() => setPage("campaigns")} />}
-        {page === "campaigns" && user && apiSettings && <CampaignsPage user={user} apiSettings={apiSettings} onBack={() => setPage("settings")} onLogout={handleLogout} showToast={showToast} />}
+        {page === "settings" && user && <ApiSettingsPage user={user} apiSettings={apiSettings} onLogout={handleLogout} onSave={handleApiSave} onGoCampaigns={() => setPage("main")} />}
+        {page === "main" && user && apiSettings && tab === "campaigns" && <CampaignsPage user={user} apiSettings={apiSettings} onBack={() => setPage("settings")} onLogout={handleLogout} showToast={showToast} />}
+        {page === "main" && user && apiSettings && tab === "cost" && <CostPage user={user} apiSettings={apiSettings} onBack={() => setPage("settings")} onLogout={handleLogout} showToast={showToast} />}
+        {page === "main" && user && apiSettings && <TabBar active={tab} onChange={setTab} />}
       </div>
     </div>
   );

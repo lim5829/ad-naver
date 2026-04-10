@@ -760,12 +760,41 @@ function TabBar({ active, onChange }) {
   );
 }
 
+// ─── Mini Bar Chart ───
+function MiniChart({ data, color, height = 60 }) {
+  if (!data || data.length === 0) return null;
+  const max = Math.max(...data.map(d => d.value), 1);
+  const barW = Math.min(Math.floor((100 / data.length) - 1), 12);
+  return (
+    <div style={{ display: "flex", alignItems: "flex-end", gap: 2, height, padding: "4px 0" }}>
+      {data.map((d, i) => (
+        <div key={i} style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", gap: 2 }}>
+          <div style={{
+            width: "100%", maxWidth: barW, minWidth: 4,
+            height: Math.max((d.value / max) * (height - 16), 2),
+            background: color || theme.accent, borderRadius: 2,
+            opacity: 0.4 + (d.value / max) * 0.6,
+            transition: "height 0.3s",
+          }} />
+          {data.length <= 15 && (
+            <span style={{ fontSize: 8, color: theme.textDim, fontWeight: 500 }}>{d.label}</span>
+          )}
+        </div>
+      ))}
+    </div>
+  );
+}
+
 // ─── Cost Page ───
 function CostPage({ user, apiSettings, onBack, onLogout, showToast }) {
   const [campaigns, setCampaigns] = useState([]);
   const [stats, setStats] = useState({});
+  const [campaignStats, setCampaignStats] = useState({});
+  const [dailyData, setDailyData] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [expandedPeriod, setExpandedPeriod] = useState(null);
+  const [debugInfo, setDebugInfo] = useState({});
 
   const periods = [
     { key: "today", label: "오늘", preset: "today" },
@@ -776,57 +805,133 @@ function CostPage({ user, apiSettings, onBack, onLogout, showToast }) {
 
   const getThisMonthRange = () => {
     const now = new Date();
-    const since = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-01`;
-    const until = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
-    return { since, until };
+    const y = now.getFullYear();
+    const m = String(now.getMonth() + 1).padStart(2, "0");
+    return { since: `${y}-${m}-01`, until: `${y}-${m}-${String(now.getDate()).padStart(2, "0")}` };
+  };
+
+  const getLastMonthRange = () => {
+    const now = new Date();
+    const first = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+    const last = new Date(now.getFullYear(), now.getMonth(), 0);
+    const fmt = d => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
+    return { since: fmt(first), until: fmt(last) };
+  };
+
+  const fetchStats = async (ids, period) => {
+    const fields = '["clkCnt","impCnt","salesAmt","cpc","ctr"]';
+    try {
+      if (period.useRange) {
+        const { since, until } = getThisMonthRange();
+        return await naverApiFetch({
+          path: `/api/stats-range?ids=${encodeURIComponent(ids)}&fields=${encodeURIComponent(fields)}&since=${since}&until=${until}`,
+          ...apiSettings,
+        });
+      } else {
+        return await naverApiFetch({
+          path: `/api/stats-summary?ids=${encodeURIComponent(ids)}&fields=${encodeURIComponent(fields)}&datePreset=${period.preset}`,
+          ...apiSettings,
+        });
+      }
+    } catch (e) {
+      throw e;
+    }
+  };
+
+  const aggregateStats = (data) => {
+    const arr = Array.isArray(data) ? data : (data ? [data] : []);
+    const totals = { clkCnt: 0, impCnt: 0, salesAmt: 0, cpc: 0, ctr: 0 };
+    arr.forEach(item => {
+      totals.clkCnt += Number(item.clkCnt) || 0;
+      totals.impCnt += Number(item.impCnt) || 0;
+      totals.salesAmt += Number(item.salesAmt) || 0;
+    });
+    totals.cpc = totals.clkCnt > 0 ? Math.round(totals.salesAmt / totals.clkCnt) : 0;
+    totals.ctr = totals.impCnt > 0 ? ((totals.clkCnt / totals.impCnt) * 100).toFixed(2) : "0.00";
+    return totals;
   };
 
   const fetchAll = useCallback(async () => {
-    setLoading(true); setError("");
+    setLoading(true); setError(""); setDebugInfo({});
     try {
-      // 1. 캠페인 목록 가져오기
       const campData = await naverApiFetch({ path: "/api/campaigns", ...apiSettings });
       const camps = Array.isArray(campData) ? campData : [];
       setCampaigns(camps);
 
-      if (camps.length === 0) { setLoading(false); return; }
+      if (camps.length === 0) {
+        setStats({}); setCampaignStats({}); setDailyData([]);
+        setLoading(false);
+        return;
+      }
 
-      const ids = camps.map(c => c.nccCampaignId).join(",");
-      const fields = '["clkCnt","impCnt","salesAmt","cpc","ctr"]';
+      const allIds = camps.map(c => c.nccCampaignId);
+      const idsStr = allIds.join(",");
       const results = {};
+      const campResults = {};
+      const debug = {};
 
-      // 2. 각 기간별 통계 조회
+      // 각 기간별 전체 통계
       for (const p of periods) {
         try {
-          let data;
-          if (p.useRange) {
-            const { since, until } = getThisMonthRange();
-            data = await naverApiFetch({
-              path: `/api/stats-range?ids=${encodeURIComponent(ids)}&fields=${encodeURIComponent(fields)}&since=${since}&until=${until}`,
-              ...apiSettings,
-            });
-          } else {
-            data = await naverApiFetch({
-              path: `/api/stats-summary?ids=${encodeURIComponent(ids)}&fields=${encodeURIComponent(fields)}&datePreset=${p.preset}`,
-              ...apiSettings,
-            });
-          }
-          // 합산
-          const arr = Array.isArray(data) ? data : [];
-          const totals = { clkCnt: 0, impCnt: 0, salesAmt: 0, cpc: 0, ctr: 0 };
+          const data = await fetchStats(idsStr, p);
+          debug[p.key] = { raw: data, type: typeof data, isArray: Array.isArray(data), length: Array.isArray(data) ? data.length : "N/A" };
+          results[p.key] = aggregateStats(data);
+
+          // 캠페인별 분리
+          const arr = Array.isArray(data) ? data : (data ? [data] : []);
+          const byCampaign = {};
           arr.forEach(item => {
-            totals.clkCnt += item.clkCnt || 0;
-            totals.impCnt += item.impCnt || 0;
-            totals.salesAmt += item.salesAmt || 0;
+            const id = item.id || item.nccCampaignId;
+            if (!byCampaign[id]) byCampaign[id] = [];
+            byCampaign[id].push(item);
           });
-          totals.cpc = totals.clkCnt > 0 ? Math.round(totals.salesAmt / totals.clkCnt) : 0;
-          totals.ctr = totals.impCnt > 0 ? ((totals.clkCnt / totals.impCnt) * 100).toFixed(2) : "0.00";
-          results[p.key] = totals;
+          campResults[p.key] = {};
+          camps.forEach(c => {
+            const items = byCampaign[c.nccCampaignId] || [];
+            campResults[p.key][c.nccCampaignId] = items.length > 0 ? aggregateStats(items) : { clkCnt: 0, impCnt: 0, salesAmt: 0, cpc: 0, ctr: "0.00" };
+          });
         } catch (e) {
-          results[p.key] = { clkCnt: "-", impCnt: "-", salesAmt: "-", cpc: "-", ctr: "-", error: e.message };
+          debug[p.key] = { error: e.message };
+          results[p.key] = { clkCnt: 0, impCnt: 0, salesAmt: 0, cpc: 0, ctr: "0.00", error: e.message };
+          campResults[p.key] = {};
         }
       }
+
+      // 일별 추이 (이번달)
+      try {
+        const { since, until } = getThisMonthRange();
+        const fields = '["clkCnt","impCnt","salesAmt"]';
+        const dailyRaw = await naverApiFetch({
+          path: `/api/stats-range?ids=${encodeURIComponent(idsStr)}&fields=${encodeURIComponent(fields)}&since=${since}&until=${until}`,
+          ...apiSettings,
+        });
+        const arr = Array.isArray(dailyRaw) ? dailyRaw : [];
+        // Group by date
+        const byDate = {};
+        arr.forEach(item => {
+          const dt = item.statDt || item.date;
+          if (dt) {
+            if (!byDate[dt]) byDate[dt] = { clkCnt: 0, salesAmt: 0, impCnt: 0 };
+            byDate[dt].clkCnt += Number(item.clkCnt) || 0;
+            byDate[dt].salesAmt += Number(item.salesAmt) || 0;
+            byDate[dt].impCnt += Number(item.impCnt) || 0;
+          }
+        });
+        const sorted = Object.entries(byDate).sort(([a],[b]) => a.localeCompare(b));
+        setDailyData(sorted.map(([dt, v]) => ({
+          date: dt,
+          label: dt.slice(8),
+          ...v,
+        })));
+        debug.daily = { count: sorted.length, sample: sorted[0] };
+      } catch (e) {
+        debug.daily = { error: e.message };
+        setDailyData([]);
+      }
+
       setStats(results);
+      setCampaignStats(campResults);
+      setDebugInfo(debug);
     } catch (e) {
       setError(e.message);
     }
@@ -835,31 +940,84 @@ function CostPage({ user, apiSettings, onBack, onLogout, showToast }) {
 
   useEffect(() => { fetchAll(); }, [fetchAll]);
 
+  // ─── Stat Row ───
+  const StatGrid = ({ s, compact }) => {
+    const fs = compact ? 14 : 18;
+    return (
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 6 }}>
+        <div style={{ background: theme.surfaceLight, borderRadius: 10, padding: compact ? "8px 6px" : "12px 8px", textAlign: "center" }}>
+          <div style={{ fontSize: 9, color: theme.textDim, fontWeight: 600, marginBottom: 3 }}>노출수</div>
+          <div style={{ fontSize: compact ? 12 : 14, fontWeight: 800, color: theme.text }}>{typeof s.impCnt === "number" ? fmtNum(s.impCnt) : s.impCnt}</div>
+        </div>
+        <div style={{ background: theme.surfaceLight, borderRadius: 10, padding: compact ? "8px 6px" : "12px 8px", textAlign: "center" }}>
+          <div style={{ fontSize: 9, color: theme.textDim, fontWeight: 600, marginBottom: 3 }}>클릭수</div>
+          <div style={{ fontSize: fs, fontWeight: 800, color: theme.accent }}>{typeof s.clkCnt === "number" ? fmtNum(s.clkCnt) : s.clkCnt}</div>
+        </div>
+        <div style={{ background: theme.surfaceLight, borderRadius: 10, padding: compact ? "8px 6px" : "12px 8px", textAlign: "center" }}>
+          <div style={{ fontSize: 9, color: theme.textDim, fontWeight: 600, marginBottom: 3 }}>평균CPC</div>
+          <div style={{ fontSize: compact ? 11 : 13, fontWeight: 800, color: theme.text }}>{typeof s.cpc === "number" ? `${fmtNum(s.cpc)}원` : s.cpc}</div>
+        </div>
+        <div style={{ background: theme.surfaceLight, borderRadius: 10, padding: compact ? "8px 6px" : "12px 8px", textAlign: "center" }}>
+          <div style={{ fontSize: 9, color: theme.textDim, fontWeight: 600, marginBottom: 3 }}>총비용</div>
+          <div style={{ fontSize: compact ? 11 : 13, fontWeight: 800, color: theme.danger }}>{typeof s.salesAmt === "number" ? `${fmtNum(s.salesAmt)}원` : s.salesAmt}</div>
+        </div>
+      </div>
+    );
+  };
+
+  // ─── Period Card ───
   const StatCard = ({ period }) => {
     const s = stats[period.key];
     const hasError = s?.error;
+    const isExpanded = expandedPeriod === period.key;
+    const campData = campaignStats[period.key] || {};
+
     return (
       <Card style={{ marginBottom: 12, padding: 16 }}>
-        <div style={{ fontSize: 15, fontWeight: 800, color: theme.text, marginBottom: 14 }}>{period.label}</div>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+          <div style={{ fontSize: 15, fontWeight: 800, color: theme.text }}>{period.label}</div>
+          {s && !hasError && campaigns.length > 1 && (
+            <button onClick={() => setExpandedPeriod(isExpanded ? null : period.key)} style={{
+              background: isExpanded ? theme.accentDim : theme.surfaceLight,
+              border: `1px solid ${isExpanded ? theme.accent + "33" : "transparent"}`,
+              borderRadius: 8, padding: "4px 10px", fontSize: 11, fontWeight: 700,
+              color: isExpanded ? theme.accent : theme.textDim, cursor: "pointer",
+            }}>
+              {isExpanded ? "접기" : `캠페인별 (${campaigns.length})`}
+            </button>
+          )}
+        </div>
+
         {hasError ? (
-          <div style={{ fontSize: 12, color: theme.danger, padding: 8, background: theme.dangerDim, borderRadius: 8 }}>{s.error}</div>
+          <div style={{ fontSize: 12, color: theme.danger, padding: 10, background: theme.dangerDim, borderRadius: 8, lineHeight: 1.5 }}>
+            조회 실패: {s.error}
+            <br/><span style={{ fontSize: 11, color: theme.textDim }}>해당 기간에 데이터가 없을 수 있습니다</span>
+          </div>
         ) : !s ? (
           <div style={{ height: 60, background: theme.surfaceLight, borderRadius: 10, animation: "pulse 1.5s ease-in-out infinite" }} />
         ) : (
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8 }}>
-            <div style={{ background: theme.surfaceLight, borderRadius: 10, padding: "12px 8px", textAlign: "center" }}>
-              <div style={{ fontSize: 10, color: theme.textDim, fontWeight: 600, marginBottom: 4 }}>클릭수</div>
-              <div style={{ fontSize: 18, fontWeight: 800, color: theme.accent }}>{typeof s.clkCnt === "number" ? fmtNum(s.clkCnt) : s.clkCnt}</div>
-            </div>
-            <div style={{ background: theme.surfaceLight, borderRadius: 10, padding: "12px 8px", textAlign: "center" }}>
-              <div style={{ fontSize: 10, color: theme.textDim, fontWeight: 600, marginBottom: 4 }}>평균 CPC</div>
-              <div style={{ fontSize: 16, fontWeight: 800, color: theme.text }}>{typeof s.cpc === "number" ? `${fmtNum(s.cpc)}원` : s.cpc}</div>
-            </div>
-            <div style={{ background: theme.surfaceLight, borderRadius: 10, padding: "12px 8px", textAlign: "center" }}>
-              <div style={{ fontSize: 10, color: theme.textDim, fontWeight: 600, marginBottom: 4 }}>총 비용</div>
-              <div style={{ fontSize: 16, fontWeight: 800, color: theme.danger }}>{typeof s.salesAmt === "number" ? `${fmtNum(s.salesAmt)}원` : s.salesAmt}</div>
-            </div>
-          </div>
+          <>
+            <StatGrid s={s} />
+
+            {/* 캠페인별 분리 */}
+            {isExpanded && (
+              <div style={{ marginTop: 12, borderTop: `1px solid ${theme.border}`, paddingTop: 12 }}>
+                {campaigns.map(c => {
+                  const cs = campData[c.nccCampaignId];
+                  if (!cs) return null;
+                  return (
+                    <div key={c.nccCampaignId} style={{ marginBottom: 10 }}>
+                      <div style={{ fontSize: 12, fontWeight: 700, color: theme.text, marginBottom: 6, display: "flex", alignItems: "center", gap: 6 }}>
+                        <span style={{ width: 4, height: 4, borderRadius: "50%", background: cs.salesAmt > 0 ? theme.accent : theme.textDim, display: "inline-block" }} />
+                        {c.name}
+                      </div>
+                      <StatGrid s={cs} compact />
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </>
         )}
       </Card>
     );
@@ -882,13 +1040,14 @@ function CostPage({ user, apiSettings, onBack, onLogout, showToast }) {
         </div>
       </div>
 
+      {/* Loading */}
       {loading && (
         <div>
           {[1,2,3,4].map(i => (
             <Card key={i} style={{ marginBottom: 12, padding: 16 }}>
               <div style={{ height: 16, width: 60, background: theme.surfaceLight, borderRadius: 8, marginBottom: 14, animation: "pulse 1.5s ease-in-out infinite" }} />
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8 }}>
-                {[1,2,3].map(j => <div key={j} style={{ height: 56, background: theme.surfaceLight, borderRadius: 10, animation: "pulse 1.5s ease-in-out infinite" }} />)}
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 6 }}>
+                {[1,2,3,4].map(j => <div key={j} style={{ height: 50, background: theme.surfaceLight, borderRadius: 10, animation: "pulse 1.5s ease-in-out infinite" }} />)}
               </div>
             </Card>
           ))}
@@ -896,6 +1055,7 @@ function CostPage({ user, apiSettings, onBack, onLogout, showToast }) {
         </div>
       )}
 
+      {/* Error */}
       {error && (
         <Card style={{ padding: 20, textAlign: "center" }}>
           <div style={{ fontSize: 30, marginBottom: 10 }}>⚠️</div>
@@ -905,6 +1065,22 @@ function CostPage({ user, apiSettings, onBack, onLogout, showToast }) {
         </Card>
       )}
 
+      {/* Daily Chart */}
+      {!loading && !error && dailyData.length > 1 && (
+        <Card style={{ marginBottom: 12, padding: 16 }}>
+          <div style={{ fontSize: 13, fontWeight: 800, color: theme.text, marginBottom: 4 }}>이번달 일별 비용 추이</div>
+          <div style={{ fontSize: 11, color: theme.textDim, marginBottom: 8 }}>
+            총 {fmtNum(dailyData.reduce((s, d) => s + d.salesAmt, 0))}원
+          </div>
+          <MiniChart data={dailyData.map(d => ({ value: d.salesAmt, label: d.label }))} color={theme.danger} height={50} />
+          <div style={{ marginTop: 6 }}>
+            <div style={{ fontSize: 11, color: theme.textDim, marginBottom: 4 }}>일별 클릭수</div>
+            <MiniChart data={dailyData.map(d => ({ value: d.clkCnt, label: d.label }))} color={theme.accent} height={40} />
+          </div>
+        </Card>
+      )}
+
+      {/* Period Cards */}
       {!loading && !error && periods.map(p => (
         <StatCard key={p.key} period={p} />
       ))}

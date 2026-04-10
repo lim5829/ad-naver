@@ -616,7 +616,7 @@ function SkeletonCard() {
 }
 
 // ─── Campaigns Page ───
-function CampaignsPage({ user, apiSettings, onBack, onLogout, showToast }) {
+function CampaignsPage({ user, apiSettings, showToast }) {
   const [campaigns, setCampaigns] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -787,16 +787,18 @@ function MiniChart({ data, color, height = 60 }) {
   );
 }
 
+
 // ─── Cost Page ───
-function CostPage({ user, apiSettings, onBack, onLogout, showToast }) {
+function CostPage({ user, apiSettings, showToast }) {
+  const [activePeriod, setActivePeriod] = useState("today");
   const [campaigns, setCampaigns] = useState([]);
-  const [stats, setStats] = useState({});
+  const [stats, setStats] = useState(null);
   const [campaignStats, setCampaignStats] = useState({});
   const [dailyData, setDailyData] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
-  const [expandedPeriod, setExpandedPeriod] = useState(null);
-  const [debugInfo, setDebugInfo] = useState({});
+  const [expanded, setExpanded] = useState(false);
+  const [campsLoaded, setCampsLoaded] = useState(false);
 
   const periods = [
     { key: "today", label: "오늘", preset: "today" },
@@ -805,51 +807,22 @@ function CostPage({ user, apiSettings, onBack, onLogout, showToast }) {
     { key: "lastMonth", label: "지난달", preset: "lastmonth" },
   ];
 
-  const getThisMonthRange = () => {
+  const getMonthRange = (offset) => {
     const now = new Date();
-    const y = now.getFullYear();
-    const m = String(now.getMonth() + 1).padStart(2, "0");
-    return { since: `${y}-${m}-01`, until: `${y}-${m}-${String(now.getDate()).padStart(2, "0")}` };
-  };
-
-  const getLastMonthRange = () => {
-    const now = new Date();
-    const first = new Date(now.getFullYear(), now.getMonth() - 1, 1);
-    const last = new Date(now.getFullYear(), now.getMonth(), 0);
-    const fmt = d => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
+    const first = new Date(now.getFullYear(), now.getMonth() + offset, 1);
+    const last = offset === 0 ? now : new Date(now.getFullYear(), now.getMonth() + offset + 1, 0);
+    const fmt = d => d.getFullYear() + "-" + String(d.getMonth()+1).padStart(2,"0") + "-" + String(d.getDate()).padStart(2,"0");
     return { since: fmt(first), until: fmt(last) };
   };
 
-  const fetchStats = async (ids, period) => {
-    const fields = '["clkCnt","impCnt","salesAmt","cpc","ctr"]';
-    try {
-      if (period.useRange) {
-        const { since, until } = getThisMonthRange();
-        return await naverApiFetch({
-          path: `/api/stats-range?ids=${encodeURIComponent(ids)}&fields=${encodeURIComponent(fields)}&since=${since}&until=${until}`,
-          ...apiSettings,
-        });
-      } else {
-        return await naverApiFetch({
-          path: `/api/stats-summary?ids=${encodeURIComponent(ids)}&fields=${encodeURIComponent(fields)}&datePreset=${period.preset}`,
-          ...apiSettings,
-        });
-      }
-    } catch (e) {
-      throw e;
-    }
+  const extractDataArray = (data) => {
+    if (Array.isArray(data)) return data;
+    if (data && Array.isArray(data.data)) return data.data;
+    if (data && typeof data === "object") return [data];
+    return [];
   };
 
-  const aggregateStats = (data) => {
-    // API 응답이 { data: [...] } 형태일 수 있음
-    let arr = [];
-    if (Array.isArray(data)) {
-      arr = data;
-    } else if (data && Array.isArray(data.data)) {
-      arr = data.data;
-    } else if (data && typeof data === "object") {
-      arr = [data];
-    }
+  const aggregateStats = (arr) => {
     const totals = { clkCnt: 0, impCnt: 0, salesAmt: 0, cpc: 0, ctr: 0 };
     arr.forEach(item => {
       totals.clkCnt += Number(item.clkCnt) || 0;
@@ -861,198 +834,84 @@ function CostPage({ user, apiSettings, onBack, onLogout, showToast }) {
     return totals;
   };
 
-  // 응답에서 data 배열 추출
-  const extractDataArray = (data) => {
-    if (Array.isArray(data)) return data;
-    if (data && Array.isArray(data.data)) return data.data;
-    if (data && typeof data === "object") return [data];
-    return [];
-  };
+  const loadCampaigns = useCallback(async () => {
+    if (campsLoaded) return campaigns;
+    const d = await naverApiFetch({ path: "/api/campaigns", ...apiSettings });
+    const c = Array.isArray(d) ? d : [];
+    setCampaigns(c); setCampsLoaded(true);
+    return c;
+  }, [apiSettings, campsLoaded, campaigns]);
 
-  const fetchAll = useCallback(async () => {
-    setLoading(true); setError(""); setDebugInfo({});
+  const loadPeriod = useCallback(async (periodKey) => {
+    setLoading(true); setError(""); setStats(null); setCampaignStats({}); setDailyData([]); setExpanded(false);
+    const p = periods.find(x => x.key === periodKey);
     try {
-      const campData = await naverApiFetch({ path: "/api/campaigns", ...apiSettings });
-      const camps = Array.isArray(campData) ? campData : [];
-      setCampaigns(camps);
+      const camps = await loadCampaigns();
+      if (camps.length === 0) { setLoading(false); return; }
+      const idsStr = camps.map(c => c.nccCampaignId).join(",");
+      const fields = '["clkCnt","impCnt","salesAmt","cpc","ctr"]';
 
-      if (camps.length === 0) {
-        setStats({}); setCampaignStats({}); setDailyData([]);
-        setLoading(false);
-        return;
+      let data;
+      if (p.useRange) {
+        const r = getMonthRange(0);
+        data = await naverApiFetch({ path: "/api/stats-range?ids=" + encodeURIComponent(idsStr) + "&fields=" + encodeURIComponent(fields) + "&since=" + r.since + "&until=" + r.until, ...apiSettings });
+      } else if (p.key === "lastMonth") {
+        const r = getMonthRange(-1);
+        data = await naverApiFetch({ path: "/api/stats-range?ids=" + encodeURIComponent(idsStr) + "&fields=" + encodeURIComponent(fields) + "&since=" + r.since + "&until=" + r.until, ...apiSettings });
+      } else {
+        data = await naverApiFetch({ path: "/api/stats-summary?ids=" + encodeURIComponent(idsStr) + "&fields=" + encodeURIComponent(fields) + "&datePreset=" + p.preset, ...apiSettings });
       }
 
-      const allIds = camps.map(c => c.nccCampaignId);
-      const idsStr = allIds.join(",");
-      const results = {};
-      const campResults = {};
-      const debug = {};
+      const arr = extractDataArray(data);
+      setStats(aggregateStats(arr));
 
-      // 각 기간별 전체 통계
-      for (const p of periods) {
+      const byCampaign = {};
+      arr.forEach(item => { const id = item.id || item.nccCampaignId; if (!byCampaign[id]) byCampaign[id] = []; byCampaign[id].push(item); });
+      const cr = {};
+      camps.forEach(c => { const items = byCampaign[c.nccCampaignId] || []; cr[c.nccCampaignId] = items.length > 0 ? aggregateStats(items) : { clkCnt:0, impCnt:0, salesAmt:0, cpc:0, ctr:"0.00" }; });
+      setCampaignStats(cr);
+
+      if (p.key === "thisMonth" || p.key === "lastMonth") {
         try {
-          const data = await fetchStats(idsStr, p);
-          const extracted = extractDataArray(data);
-          debug[p.key] = { version: "v3", rawType: typeof data, isArray: Array.isArray(data), hasDataProp: !!(data && data.data), extractedLength: extracted.length, firstItem: extracted[0] || null };
-          results[p.key] = aggregateStats(data);
-
-          // 캠페인별 분리
-          const arr = extractDataArray(data);
-          const byCampaign = {};
-          arr.forEach(item => {
-            const id = item.id || item.nccCampaignId;
-            if (!byCampaign[id]) byCampaign[id] = [];
-            byCampaign[id].push(item);
-          });
-          campResults[p.key] = {};
-          camps.forEach(c => {
-            const items = byCampaign[c.nccCampaignId] || [];
-            campResults[p.key][c.nccCampaignId] = items.length > 0 ? aggregateStats(items) : { clkCnt: 0, impCnt: 0, salesAmt: 0, cpc: 0, ctr: "0.00" };
-          });
-        } catch (e) {
-          debug[p.key] = { error: e.message };
-          results[p.key] = { clkCnt: 0, impCnt: 0, salesAmt: 0, cpc: 0, ctr: "0.00", error: e.message };
-          campResults[p.key] = {};
-        }
+          const r = p.key === "thisMonth" ? getMonthRange(0) : getMonthRange(-1);
+          const df = '["clkCnt","impCnt","salesAmt"]';
+          const dr = await naverApiFetch({ path: "/api/stats-range?ids=" + encodeURIComponent(idsStr) + "&fields=" + encodeURIComponent(df) + "&since=" + r.since + "&until=" + r.until, ...apiSettings });
+          const darr = extractDataArray(dr);
+          const byDate = {};
+          darr.forEach(item => { const dt = item.statDt || item.date; if (dt) { if (!byDate[dt]) byDate[dt] = { clkCnt:0, salesAmt:0, impCnt:0 }; byDate[dt].clkCnt += Number(item.clkCnt)||0; byDate[dt].salesAmt += Number(item.salesAmt)||0; byDate[dt].impCnt += Number(item.impCnt)||0; }});
+          const sorted = Object.entries(byDate).sort(([a],[b]) => a.localeCompare(b));
+          setDailyData(sorted.map(([dt, v]) => ({ date: dt, label: dt.slice(8), ...v })));
+        } catch(e) { setDailyData([]); }
       }
-
-      // 일별 추이 (이번달)
-      try {
-        const { since, until } = getThisMonthRange();
-        const fields = '["clkCnt","impCnt","salesAmt"]';
-        const dailyRaw = await naverApiFetch({
-          path: `/api/stats-range?ids=${encodeURIComponent(idsStr)}&fields=${encodeURIComponent(fields)}&since=${since}&until=${until}`,
-          ...apiSettings,
-        });
-        const arr = extractDataArray(dailyRaw);
-        // Group by date
-        const byDate = {};
-        arr.forEach(item => {
-          const dt = item.statDt || item.date;
-          if (dt) {
-            if (!byDate[dt]) byDate[dt] = { clkCnt: 0, salesAmt: 0, impCnt: 0 };
-            byDate[dt].clkCnt += Number(item.clkCnt) || 0;
-            byDate[dt].salesAmt += Number(item.salesAmt) || 0;
-            byDate[dt].impCnt += Number(item.impCnt) || 0;
-          }
-        });
-        const sorted = Object.entries(byDate).sort(([a],[b]) => a.localeCompare(b));
-        setDailyData(sorted.map(([dt, v]) => ({
-          date: dt,
-          label: dt.slice(8),
-          ...v,
-        })));
-        debug.daily = { count: sorted.length, sample: sorted[0] };
-      } catch (e) {
-        debug.daily = { error: e.message };
-        setDailyData([]);
-      }
-
-      setStats(results);
-      setCampaignStats(campResults);
-      setDebugInfo(debug);
-    } catch (e) {
-      setError(e.message);
-    }
+    } catch (e) { setError(e.message); }
     setLoading(false);
-  }, [apiSettings]);
+  }, [apiSettings, loadCampaigns]);
 
-  useEffect(() => { fetchAll(); }, [fetchAll]);
+  useEffect(() => { loadPeriod(activePeriod); }, [activePeriod]);
 
-  // ─── Stat Row ───
-  const StatGrid = ({ s, compact }) => {
-    const fs = compact ? 14 : 18;
-    return (
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 6 }}>
-        <div style={{ background: theme.surfaceLight, borderRadius: 10, padding: compact ? "8px 6px" : "12px 8px", textAlign: "center" }}>
-          <div style={{ fontSize: 9, color: theme.textDim, fontWeight: 600, marginBottom: 3 }}>노출수</div>
-          <div style={{ fontSize: compact ? 12 : 14, fontWeight: 800, color: theme.text }}>{typeof s.impCnt === "number" ? fmtNum(s.impCnt) : s.impCnt}</div>
+  const StatGrid = ({ s, compact }) => (
+    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 6 }}>
+      {[
+        { label: "노출수", value: typeof s.impCnt === "number" ? fmtNum(s.impCnt) : s.impCnt, color: theme.text },
+        { label: "클릭수", value: typeof s.clkCnt === "number" ? fmtNum(s.clkCnt) : s.clkCnt, color: theme.accent, big: true },
+        { label: "평균CPC", value: typeof s.cpc === "number" ? fmtNum(s.cpc) + "원" : s.cpc, color: theme.text },
+        { label: "총비용", value: typeof s.salesAmt === "number" ? fmtNum(s.salesAmt) + "원" : s.salesAmt, color: theme.danger },
+      ].map((x, i) => (
+        <div key={i} style={{ background: theme.surfaceLight, borderRadius: 10, padding: compact ? "8px 6px" : "12px 8px", textAlign: "center" }}>
+          <div style={{ fontSize: 9, color: theme.textDim, fontWeight: 600, marginBottom: 3 }}>{x.label}</div>
+          <div style={{ fontSize: compact ? (x.big ? 14 : 11) : (x.big ? 20 : 14), fontWeight: 800, color: x.color }}>{x.value}</div>
         </div>
-        <div style={{ background: theme.surfaceLight, borderRadius: 10, padding: compact ? "8px 6px" : "12px 8px", textAlign: "center" }}>
-          <div style={{ fontSize: 9, color: theme.textDim, fontWeight: 600, marginBottom: 3 }}>클릭수</div>
-          <div style={{ fontSize: fs, fontWeight: 800, color: theme.accent }}>{typeof s.clkCnt === "number" ? fmtNum(s.clkCnt) : s.clkCnt}</div>
-        </div>
-        <div style={{ background: theme.surfaceLight, borderRadius: 10, padding: compact ? "8px 6px" : "12px 8px", textAlign: "center" }}>
-          <div style={{ fontSize: 9, color: theme.textDim, fontWeight: 600, marginBottom: 3 }}>평균CPC</div>
-          <div style={{ fontSize: compact ? 11 : 13, fontWeight: 800, color: theme.text }}>{typeof s.cpc === "number" ? `${fmtNum(s.cpc)}원` : s.cpc}</div>
-        </div>
-        <div style={{ background: theme.surfaceLight, borderRadius: 10, padding: compact ? "8px 6px" : "12px 8px", textAlign: "center" }}>
-          <div style={{ fontSize: 9, color: theme.textDim, fontWeight: 600, marginBottom: 3 }}>총비용</div>
-          <div style={{ fontSize: compact ? 11 : 13, fontWeight: 800, color: theme.danger }}>{typeof s.salesAmt === "number" ? `${fmtNum(s.salesAmt)}원` : s.salesAmt}</div>
-        </div>
-      </div>
-    );
-  };
+      ))}
+    </div>
+  );
 
-  // ─── Period Card ───
-  const StatCard = ({ period }) => {
-    const s = stats[period.key];
-    const hasError = s?.error;
-    const isExpanded = expandedPeriod === period.key;
-    const campData = campaignStats[period.key] || {};
-
-    return (
-      <Card style={{ marginBottom: 12, padding: 16 }}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
-          <div style={{ fontSize: 15, fontWeight: 800, color: theme.text }}>{period.label}</div>
-          {s && !hasError && campaigns.length > 1 && (
-            <button onClick={() => setExpandedPeriod(isExpanded ? null : period.key)} style={{
-              background: isExpanded ? theme.accentDim : theme.surfaceLight,
-              border: `1px solid ${isExpanded ? theme.accent + "33" : "transparent"}`,
-              borderRadius: 8, padding: "4px 10px", fontSize: 11, fontWeight: 700,
-              color: isExpanded ? theme.accent : theme.textDim, cursor: "pointer",
-            }}>
-              {isExpanded ? "접기" : `캠페인별 (${campaigns.length})`}
-            </button>
-          )}
-        </div>
-
-        {hasError ? (
-          <div style={{ fontSize: 12, color: theme.danger, padding: 10, background: theme.dangerDim, borderRadius: 8, lineHeight: 1.5 }}>
-            조회 실패: {s.error}
-            <br/><span style={{ fontSize: 11, color: theme.textDim }}>해당 기간에 데이터가 없을 수 있습니다</span>
-          </div>
-        ) : !s ? (
-          <div style={{ height: 60, background: theme.surfaceLight, borderRadius: 10, animation: "pulse 1.5s ease-in-out infinite" }} />
-        ) : (
-          <>
-            <StatGrid s={s} />
-
-            {/* 캠페인별 분리 */}
-            {isExpanded && (
-              <div style={{ marginTop: 12, borderTop: `1px solid ${theme.border}`, paddingTop: 12 }}>
-                {campaigns.filter(c => {
-                  const cs = campData[c.nccCampaignId];
-                  return cs && cs.salesAmt > 0;
-                }).map(c => {
-                  const cs = campData[c.nccCampaignId];
-                  return (
-                    <div key={c.nccCampaignId} style={{ marginBottom: 10 }}>
-                      <div style={{ fontSize: 12, fontWeight: 700, color: theme.text, marginBottom: 6, display: "flex", alignItems: "center", gap: 6 }}>
-                        <span style={{ width: 4, height: 4, borderRadius: "50%", background: theme.accent, display: "inline-block" }} />
-                        {c.name}
-                      </div>
-                      <StatGrid s={cs} compact />
-                    </div>
-                  );
-                })}
-                {campaigns.filter(c => { const cs = campData[c.nccCampaignId]; return cs && cs.salesAmt > 0; }).length === 0 && (
-                  <div style={{ textAlign: "center", padding: 12, color: theme.textDim, fontSize: 12 }}>비용이 발생한 캠페인이 없습니다</div>
-                )}
-              </div>
-            )}
-          </>
-        )}
-      </Card>
-    );
-  };
+  const activeCamps = campaigns.filter(c => { const cs = campaignStats[c.nccCampaignId]; return cs && cs.salesAmt > 0; });
 
   return (
     <div style={{ minHeight: "100vh", padding: "0 20px 80px" }}>
-      {/* Header */}
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "20px 0 16px", position: "sticky", top: 0, zIndex: 10, background: `linear-gradient(${theme.bg}, ${theme.bg}ee)`, backdropFilter: "blur(12px)" }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "20px 0 12px", position: "sticky", top: 0, zIndex: 10, background: theme.bg + "ee", backdropFilter: "blur(12px)" }}>
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-          <div style={{ width: 36, height: 36, borderRadius: 10, background: `linear-gradient(135deg, ${theme.accent}, ${theme.accentDark})`, display: "flex", alignItems: "center", justifyContent: "center", boxShadow: `0 2px 8px ${theme.accentGlow}` }}>
+          <div style={{ width: 36, height: 36, borderRadius: 10, background: "linear-gradient(135deg," + theme.accent + "," + theme.accentDark + ")", display: "flex", alignItems: "center", justifyContent: "center", boxShadow: "0 2px 8px " + theme.accentGlow }}>
             <svg width="18" height="18" viewBox="0 0 24 24" fill="#fff"><path d="M16.27 3H7.73A4.73 4.73 0 0 0 3 7.73v8.54A4.73 4.73 0 0 0 7.73 21h8.54A4.73 4.73 0 0 0 21 16.27V7.73A4.73 4.73 0 0 0 16.27 3zm-2.1 12.27h-2.4l-2.6-3.6v3.6H6.97V8.73h2.4l2.6 3.56V8.73h2.2v6.54z"/></svg>
           </div>
           <div>
@@ -1060,81 +919,92 @@ function CostPage({ user, apiSettings, onBack, onLogout, showToast }) {
             <div style={{ fontSize: 11, color: theme.textDim, fontWeight: 500 }}>{user.name}</div>
           </div>
         </div>
-        <div style={{ display: "flex", gap: 8 }}>
-          <button onClick={fetchAll} style={{ background: theme.surface, border: `1.5px solid ${theme.border}`, borderRadius: 10, width: 38, height: 38, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", color: theme.accent, boxShadow: theme.cardShadow }}>{I.refresh}</button>
-        </div>
+        <button onClick={() => loadPeriod(activePeriod)} style={{ background: theme.surface, border: "1.5px solid " + theme.border, borderRadius: 10, width: 38, height: 38, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", color: theme.accent, boxShadow: theme.cardShadow }}>{I.refresh}</button>
       </div>
 
-      {/* Loading */}
+      <div style={{ display: "flex", gap: 6, marginBottom: 16, background: theme.surface, borderRadius: 12, padding: 4, border: "1px solid " + theme.border }}>
+        {periods.map(p => (
+          <button key={p.key} onClick={() => setActivePeriod(p.key)} style={{
+            flex: 1, padding: "10px 0", borderRadius: 10, border: "none", fontSize: 13, fontWeight: 700,
+            cursor: "pointer", transition: "all 0.2s",
+            background: activePeriod === p.key ? theme.accent : "transparent",
+            color: activePeriod === p.key ? "#fff" : theme.textDim,
+            boxShadow: activePeriod === p.key ? "0 2px 8px " + theme.accentGlow : "none",
+          }}>{p.label}</button>
+        ))}
+      </div>
+
       {loading && (
-        <div>
-          {[1,2,3,4].map(i => (
-            <Card key={i} style={{ marginBottom: 12, padding: 16 }}>
-              <div style={{ height: 16, width: 60, background: theme.surfaceLight, borderRadius: 8, marginBottom: 14, animation: "pulse 1.5s ease-in-out infinite" }} />
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 6 }}>
-                {[1,2,3,4].map(j => <div key={j} style={{ height: 50, background: theme.surfaceLight, borderRadius: 10, animation: "pulse 1.5s ease-in-out infinite" }} />)}
+        <Card style={{ padding: 16 }}>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 6 }}>
+            {[1,2,3,4].map(j => <div key={j} style={{ height: 56, background: theme.surfaceLight, borderRadius: 10, animation: "pulse 1.5s ease-in-out infinite" }} />)}
+          </div>
+          <style>{`@keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.4} }`}</style>
+        </Card>
+      )}
+
+      {error && !loading && (
+        <Card style={{ padding: 20, textAlign: "center" }}>
+          <div style={{ fontSize: 14, color: theme.danger, fontWeight: 600, marginBottom: 6 }}>조회 실패</div>
+          <div style={{ fontSize: 12, color: theme.textDim, marginBottom: 12, lineHeight: 1.5 }}>{error}</div>
+          <Button onClick={() => loadPeriod(activePeriod)} variant="secondary">다시 시도</Button>
+        </Card>
+      )}
+
+      {!loading && !error && stats && (
+        <>
+          <Card style={{ marginBottom: 12, padding: 16 }}><StatGrid s={stats} /></Card>
+
+          {dailyData.length > 1 && (
+            <Card style={{ marginBottom: 12, padding: 16 }}>
+              <div style={{ fontSize: 13, fontWeight: 800, color: theme.text, marginBottom: 4 }}>일별 비용</div>
+              <div style={{ fontSize: 11, color: theme.textDim, marginBottom: 8 }}>총 {fmtNum(dailyData.reduce((s,d) => s+d.salesAmt,0))}원</div>
+              <MiniChart data={dailyData.map(d => ({ value: d.salesAmt, label: d.label }))} color={theme.danger} height={50} />
+              <div style={{ marginTop: 8 }}>
+                <div style={{ fontSize: 11, color: theme.textDim, marginBottom: 4 }}>일별 클릭수</div>
+                <MiniChart data={dailyData.map(d => ({ value: d.clkCnt, label: d.label }))} color={theme.accent} height={40} />
               </div>
             </Card>
-          ))}
-          <style>{`@keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.4} }`}</style>
-        </div>
-      )}
+          )}
 
-      {/* Error */}
-      {error && (
-        <Card style={{ padding: 20, textAlign: "center" }}>
-          <div style={{ fontSize: 30, marginBottom: 10 }}>⚠️</div>
-          <div style={{ fontSize: 14, color: theme.danger, fontWeight: 600, marginBottom: 6 }}>연결 오류</div>
-          <div style={{ fontSize: 12, color: theme.textDim, marginBottom: 16, lineHeight: 1.5 }}>{error}</div>
-          <Button onClick={fetchAll} variant="secondary">다시 시도</Button>
-        </Card>
-      )}
-
-      {/* Daily Chart */}
-      {!loading && !error && dailyData.length > 1 && (
-        <Card style={{ marginBottom: 12, padding: 16 }}>
-          <div style={{ fontSize: 13, fontWeight: 800, color: theme.text, marginBottom: 4 }}>이번달 일별 비용 추이</div>
-          <div style={{ fontSize: 11, color: theme.textDim, marginBottom: 8 }}>
-            총 {fmtNum(dailyData.reduce((s, d) => s + d.salesAmt, 0))}원
-          </div>
-          <MiniChart data={dailyData.map(d => ({ value: d.salesAmt, label: d.label }))} color={theme.danger} height={50} />
-          <div style={{ marginTop: 6 }}>
-            <div style={{ fontSize: 11, color: theme.textDim, marginBottom: 4 }}>일별 클릭수</div>
-            <MiniChart data={dailyData.map(d => ({ value: d.clkCnt, label: d.label }))} color={theme.accent} height={40} />
-          </div>
-        </Card>
-      )}
-
-      {/* Period Cards */}
-      {!loading && !error && periods.map(p => (
-        <StatCard key={p.key} period={p} />
-      ))}
-
-      {/* Debug Panel */}
-      {!loading && Object.keys(debugInfo).length > 0 && (
-        <DebugPanel debugInfo={debugInfo} />
+          {activeCamps.length > 0 && (
+            <div style={{ marginBottom: 12 }}>
+              <button onClick={() => setExpanded(!expanded)} style={{
+                width: "100%", display: "flex", alignItems: "center", justifyContent: "space-between",
+                background: theme.surface, border: "1px solid " + (expanded ? theme.accent + "33" : theme.border),
+                borderRadius: expanded ? "14px 14px 0 0" : 14, padding: "12px 16px",
+                cursor: "pointer", boxShadow: theme.cardShadow,
+              }}>
+                <span style={{ fontSize: 13, fontWeight: 700, color: theme.text }}>캠페인별 상세</span>
+                <span style={{ fontSize: 12, color: theme.textDim, fontWeight: 600 }}>
+                  {activeCamps.length}개
+                  <svg width="14" height="14" fill="none" viewBox="0 0 24 24" stroke={theme.textDim} strokeWidth="2.5" style={{ marginLeft: 4, verticalAlign: "middle", transition: "transform 0.2s", transform: expanded ? "rotate(90deg)" : "rotate(0deg)" }}><polyline points="9 18 15 12 9 6" /></svg>
+                </span>
+              </button>
+              {expanded && (
+                <div style={{ background: theme.bg, border: "1px solid " + theme.accent + "22", borderTop: "none", borderRadius: "0 0 14px 14px", padding: 12 }}>
+                  {activeCamps.map(c => {
+                    const cs = campaignStats[c.nccCampaignId];
+                    return (
+                      <div key={c.nccCampaignId} style={{ marginBottom: 10 }}>
+                        <div style={{ fontSize: 12, fontWeight: 700, color: theme.text, marginBottom: 6, display: "flex", alignItems: "center", gap: 6 }}>
+                          <span style={{ width: 4, height: 4, borderRadius: "50%", background: theme.accent, display: "inline-block" }} />
+                          {c.name}
+                        </div>
+                        <StatGrid s={cs} compact />
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          )}
+        </>
       )}
     </div>
   );
 }
 
-function DebugPanel({ debugInfo }) {
-  const [show, setShow] = useState(false);
-  return (
-    <div style={{ marginTop: 12 }}>
-      <button onClick={() => setShow(!show)} style={{ background: "none", border: "none", color: theme.textDim, fontSize: 11, cursor: "pointer", fontWeight: 600, padding: "4px 0" }}>
-        {show ? "▼ 디버그 닫기" : "▶ API 응답 확인 (디버그)"}
-      </button>
-      {show && (
-        <Card style={{ padding: 12, marginTop: 8, background: "#f8f8fa" }}>
-          <pre style={{ fontSize: 10, color: theme.text, whiteSpace: "pre-wrap", wordBreak: "break-all", maxHeight: 400, overflow: "auto", margin: 0, fontFamily: "'JetBrains Mono', monospace", lineHeight: 1.5 }}>
-            {JSON.stringify(debugInfo, null, 2)}
-          </pre>
-        </Card>
-      )}
-    </div>
-  );
-}
 
 // ─── App ───
 function App() {
@@ -1216,7 +1086,7 @@ function App() {
         {page === "signup" && <SignupPage onSignup={handleLogin} onGoLogin={() => setPage("login")} />}
         {page === "settings" && user && <ApiSettingsPage user={user} apiSettings={apiSettings} onLogout={handleLogout} onSave={handleApiSave} onGoCampaigns={() => setPage("main")} />}
         {page === "main" && user && apiSettings && tab === "campaigns" && <CampaignsPage user={user} apiSettings={apiSettings} onLogout={handleLogout} showToast={showToast} />}
-        {page === "main" && user && apiSettings && tab === "cost" && <CostPage user={user} apiSettings={apiSettings} onLogout={handleLogout} showToast={showToast} />}
+        {page === "main" && user && apiSettings && tab === "cost" && <CostPage user={user} apiSettings={apiSettings} showToast={showToast} />}
         {page === "main" && user && apiSettings && tab === "settings" && <ApiSettingsPage user={user} apiSettings={apiSettings} onLogout={handleLogout} onSave={(s) => { setApiSettings(s); showToast("API 설정이 저장되었습니다!"); }} onGoCampaigns={() => setTab("campaigns")} />}
         {page === "main" && user && apiSettings && <TabBar active={tab} onChange={setTab} />}
       </div>

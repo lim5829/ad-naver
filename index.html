@@ -528,9 +528,12 @@ function CampaignAccordion({ campaign, apiSettings, presets, showToast }) {
   const [loading, setLoading] = useState(false);
   const [loaded, setLoaded] = useState(false);
 
+  const [errorMsg, setErrorMsg] = useState("");
+
   const toggle = async () => {
     if (!open && !loaded) {
       setLoading(true);
+      setErrorMsg("");
       try {
         const data = await naverApiFetch({
           path: `/api/adgroups?campaignId=${campaign.nccCampaignId}`,
@@ -538,12 +541,9 @@ function CampaignAccordion({ campaign, apiSettings, presets, showToast }) {
         });
         setAdgroups(Array.isArray(data) ? data : []);
       } catch (e) {
-        // Demo fallback
-        setAdgroups([
-          { nccAdgroupId: `ag-${campaign.nccCampaignId}-1`, name: "광고그룹 1", userStatus: "ELIGIBLE", bidAmt: 1000, defaultBid: 1000 },
-          { nccAdgroupId: `ag-${campaign.nccCampaignId}-2`, name: "광고그룹 2", userStatus: "ELIGIBLE", bidAmt: 2000, defaultBid: 2000 },
-          { nccAdgroupId: `ag-${campaign.nccCampaignId}-3`, name: "광고그룹 3", userStatus: "PAUSED", bidAmt: 500, defaultBid: 500 },
-        ]);
+        setErrorMsg(e.message);
+        showToast(`광고그룹 조회 실패: ${e.message}`, "error");
+      }
       }
       setLoaded(true); setLoading(false);
     }
@@ -585,8 +585,14 @@ function CampaignAccordion({ campaign, apiSettings, presets, showToast }) {
               <span style={{ width: 20, height: 20, border: `2.5px solid ${theme.accent}`, borderTopColor: "transparent", borderRadius: "50%", display: "inline-block", animation: "spin 0.7s linear infinite" }} />
             </div>
           )}
-          {!loading && adgroups.length === 0 && (
+          {!loading && adgroups.length === 0 && !errorMsg && (
             <div style={{ textAlign: "center", padding: 20, color: theme.textDim, fontSize: 13 }}>광고그룹이 없습니다</div>
+          )}
+          {!loading && errorMsg && (
+            <div style={{ textAlign: "center", padding: 16 }}>
+              <div style={{ fontSize: 13, color: theme.danger, fontWeight: 600, marginBottom: 8 }}>{errorMsg}</div>
+              <button onClick={() => { setLoaded(false); setErrorMsg(""); toggle(); }} style={{ background: theme.surfaceLight, border: `1px solid ${theme.border}`, borderRadius: 8, padding: "6px 16px", fontSize: 12, fontWeight: 600, color: theme.text, cursor: "pointer" }}>다시 시도</button>
+            </div>
           )}
           {!loading && adgroups.map(ag => (
             <AdgroupRow key={ag.nccAdgroupId} adgroup={ag} apiSettings={apiSettings} presets={presets} showToast={showToast} />

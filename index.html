@@ -1084,6 +1084,29 @@ function CostPage({ user, apiSettings, onBack, onLogout, showToast }) {
       {!loading && !error && periods.map(p => (
         <StatCard key={p.key} period={p} />
       ))}
+
+      {/* Debug Panel */}
+      {!loading && Object.keys(debugInfo).length > 0 && (
+        <DebugPanel debugInfo={debugInfo} />
+      )}
+    </div>
+  );
+}
+
+function DebugPanel({ debugInfo }) {
+  const [show, setShow] = useState(false);
+  return (
+    <div style={{ marginTop: 12 }}>
+      <button onClick={() => setShow(!show)} style={{ background: "none", border: "none", color: theme.textDim, fontSize: 11, cursor: "pointer", fontWeight: 600, padding: "4px 0" }}>
+        {show ? "▼ 디버그 닫기" : "▶ API 응답 확인 (디버그)"}
+      </button>
+      {show && (
+        <Card style={{ padding: 12, marginTop: 8, background: "#f8f8fa" }}>
+          <pre style={{ fontSize: 10, color: theme.text, whiteSpace: "pre-wrap", wordBreak: "break-all", maxHeight: 400, overflow: "auto", margin: 0, fontFamily: "'JetBrains Mono', monospace", lineHeight: 1.5 }}>
+            {JSON.stringify(debugInfo, null, 2)}
+          </pre>
+        </Card>
+      )}
     </div>
   );
 }

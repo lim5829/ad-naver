@@ -839,7 +839,15 @@ function CostPage({ user, apiSettings, onBack, onLogout, showToast }) {
   };
 
   const aggregateStats = (data) => {
-    const arr = Array.isArray(data) ? data : (data ? [data] : []);
+    // API 응답이 { data: [...] } 형태일 수 있음
+    let arr = [];
+    if (Array.isArray(data)) {
+      arr = data;
+    } else if (data && Array.isArray(data.data)) {
+      arr = data.data;
+    } else if (data && typeof data === "object") {
+      arr = [data];
+    }
     const totals = { clkCnt: 0, impCnt: 0, salesAmt: 0, cpc: 0, ctr: 0 };
     arr.forEach(item => {
       totals.clkCnt += Number(item.clkCnt) || 0;
@@ -849,6 +857,14 @@ function CostPage({ user, apiSettings, onBack, onLogout, showToast }) {
     totals.cpc = totals.clkCnt > 0 ? Math.round(totals.salesAmt / totals.clkCnt) : 0;
     totals.ctr = totals.impCnt > 0 ? ((totals.clkCnt / totals.impCnt) * 100).toFixed(2) : "0.00";
     return totals;
+  };
+
+  // 응답에서 data 배열 추출
+  const extractDataArray = (data) => {
+    if (Array.isArray(data)) return data;
+    if (data && Array.isArray(data.data)) return data.data;
+    if (data && typeof data === "object") return [data];
+    return [];
   };
 
   const fetchAll = useCallback(async () => {
@@ -878,7 +894,7 @@ function CostPage({ user, apiSettings, onBack, onLogout, showToast }) {
           results[p.key] = aggregateStats(data);
 
           // 캠페인별 분리
-          const arr = Array.isArray(data) ? data : (data ? [data] : []);
+          const arr = extractDataArray(data);
           const byCampaign = {};
           arr.forEach(item => {
             const id = item.id || item.nccCampaignId;
@@ -905,7 +921,7 @@ function CostPage({ user, apiSettings, onBack, onLogout, showToast }) {
           path: `/api/stats-range?ids=${encodeURIComponent(idsStr)}&fields=${encodeURIComponent(fields)}&since=${since}&until=${until}`,
           ...apiSettings,
         });
-        const arr = Array.isArray(dailyRaw) ? dailyRaw : [];
+        const arr = extractDataArray(dailyRaw);
         // Group by date
         const byDate = {};
         arr.forEach(item => {
